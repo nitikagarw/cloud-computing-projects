@@ -131,13 +131,11 @@ int MP1Node::introduceSelfToGroup(Address *joinaddr) {
         memberNode->inGroup = true;
     }
     else {
-        size_t msgsize = sizeof(MessageHdr) + sizeof(joinaddr->addr) + sizeof(long) + 1;
-        msg = (MessageHdr *) malloc(msgsize * sizeof(char));
-
         // create JOINREQ message: format of data is {struct Address myaddr}
+        msg = new MessageHdr();
         msg->msgType = JOINREQ;
-        memcpy((char *)(msg+1), &memberNode->addr.addr, sizeof(memberNode->addr.addr));
-        memcpy((char *)(msg+1) + 1 + sizeof(memberNode->addr.addr), &memberNode->heartbeat, sizeof(long));
+        msg->memberList = memberNode->memberList;
+        msg->addr = &memberNode->addr;
 
 #ifdef DEBUGLOG
         sprintf(s, "Trying to join...");
@@ -145,7 +143,7 @@ int MP1Node::introduceSelfToGroup(Address *joinaddr) {
 #endif
 
         // send JOINREQ message to introducer member
-        emulNet->ENsend(&memberNode->addr, joinaddr, (char *)msg, msgsize);
+        emulNet->ENsend(&memberNode->addr, joinaddr, (char *)msg, sizeof(MessageHdr));
 
         free(msg);
     }
@@ -215,9 +213,18 @@ void MP1Node::checkMessages() {
  * DESCRIPTION: Message handler for different message types
  */
 bool MP1Node::recvCallBack(void *env, char *data, int size ) {
-	/*
-	 * Your code goes here
-	 */
+    MessageHdr* msg = (MessageHdr*) data;
+    if(msg->msgType == JOINREQ) {
+        AddToMemberList(msg);
+        sendMessage(msg->addr, JOINREP);
+    } else if(msg->msgType == JOINREP) {
+        AddToMemberList(msg);
+        memberNode->inGroup = true;
+    } else if(msg->msgType == PING) {
+        pingHandler(msg);
+    }
+    delete msg;
+    return true;
 }
 
 /**
@@ -228,10 +235,29 @@ bool MP1Node::recvCallBack(void *env, char *data, int size ) {
  * 				Propagate your membership list
  */
 void MP1Node::nodeLoopOps() {
+    ++(memberNode->heartbeat);
 
-	/*
-	 * Your code goes here
-	 */
+    for(int i = memberNode->memberList.size()-1; i >= 0; --i){
+        int id = memberNode->memberList[i].id;
+        short port = memberNode->memberList[i].port;
+        long timestamp = memberNode->memberList[i].timestamp;
+
+        if(this->par->getcurrtime() - timestamp >= TREMOVE) {
+            Address* addressToRemove = getAddress(id, port);
+            log->logNodeRemove(&memberNode->addr, addressToRemove);
+            memberNode->memberList.erase(memberNode->memberList.begin()+i);
+            delete addressToRemove;
+        }
+    }
+
+    int num_members = memberNode->memberList.size();
+    for (int i = 0; i < num_members; ++i) {
+        int id = memberNode->memberList[i].id;
+        short port = memberNode->memberList[i].port;
+        Address* address = getAddress(id, port);
+        sendMessage(address, PING);
+        delete address;
+    }
 
     return;
 }
@@ -279,3 +305,122 @@ void MP1Node::printAddress(Address *addr)
     printf("%d.%d.%d.%d:%d \n",  addr->addr[0],addr->addr[1],addr->addr[2],
                                                        addr->addr[3], *(short*)&addr->addr[4]) ;    
 }
+
+/**
+ * FUNCTION NAME: AddToMemberList  
+ * 
+ * DESCRIPTION: If a node does not exist in the memberList, it will be pushed to the memberList.
+ */
+void MP1Node::AddToMemberList(MessageHdr* msg) {
+    cout << "AddToMemberList: msg" << endl;
+    int id = 0;
+    short port;
+    memcpy(&id, &msg->addr->addr[0], sizeof(int));
+    memcpy(&port, &msg->addr->addr[4], sizeof(short));
+
+    if(checkMemberList(id, port) != nullptr)
+        return;
+
+    MemberListEntry memberListEntry(id, port, 1, this->par->getcurrtime());
+    memberNode->memberList.push_back(memberListEntry);
+    log->logNodeAdd(&memberNode->addr, msg->addr);
+}
+
+/**
+ * FUNCTION NAME: AddToMemberList
+ *
+ * DESCRIPTION: If a node does not exist in the memberList, it will be pushed to the memberList.
+ */
+void MP1Node::AddToMemberList(MemberListEntry* memberListEntry) {
+    cout << "AddToMemberList: MemberListEntry" << endl;
+    Address* addr = getAddress(memberListEntry->id, memberListEntry->port);
+    if(*addr == memberNode->addr) {
+        delete addr;
+        return;
+    }
+
+    if(this->par->getcurrtime() - memberListEntry->timestamp < TREMOVE) {
+        log->logNodeAdd(&memberNode->addr, addr);
+        memberNode->memberList.push_back(*memberListEntry);
+    }
+}
+
+/**
+ * FUNCTION NAME: checkMemberList
+ *
+ * DESCRIPTION: If the node exists in the memberList, the function will return true. Otherwise, the function will return false.
+ */
+MemberListEntry* MP1Node::checkMemberList(int id, short port) {
+    int num_members = memberNode->memberList.size();
+    for(int i=0; i<num_members; ++i){
+        if(memberNode->memberList[i].id == id && memberNode->memberList[i].port == port){
+            return &memberNode->memberList[i];
+        }
+    }
+    return nullptr;
+}
+
+/**
+ * FUNCTION NAME: sendMessage
+ *
+ * DESCRIPTION: sends message using EmulNet
+ */
+void MP1Node::sendMessage(Address* toAddress, MsgTypes msgType) {
+    MessageHdr* msg = new MessageHdr();
+    msg->msgType = msgType;
+    msg->memberList = memberNode->memberList;
+    msg->addr = &memberNode->addr;
+    emulNet->ENsend(msg->addr, toAddress, (char*)msg, sizeof(MessageHdr));
+}
+
+/**
+ * FUNCTION NAME: pingHandler
+ *
+ * DESCRIPTION: The function processing the PING messages.
+ */
+void MP1Node::pingHandler(MessageHdr* msg) {
+    //Update source member
+    int srcid = 0;
+    short srcport;
+    memcpy(&srcid, &msg->addr->addr[0], sizeof(int));
+    memcpy(&srcport, &msg->addr->addr[4], sizeof(short));
+    MemberListEntry* sourceMember = checkMemberList(srcid, srcport);
+    if(sourceMember != nullptr) {
+        ++(sourceMember->heartbeat);
+        sourceMember->timestamp = this->par->getcurrtime();
+    } else {
+        AddToMemberList(msg);
+    }
+
+    int num_members = msg->memberList.size();
+    for(int i=0; i<num_members; ++i) {
+        int id = msg->memberList[i].id;
+        short port = msg->memberList[i].port;
+        long heartbeat = msg->memberList[i].heartbeat;
+
+        MemberListEntry* memberListEntry = checkMemberList(id, port);
+        if(memberListEntry == nullptr){
+            AddToMemberList(&msg->memberList[i]);
+        } else {
+            if(heartbeat > memberListEntry->heartbeat) {
+                memberListEntry->heartbeat = heartbeat;
+                memberListEntry->timestamp = this->par->getcurrtime();
+            }
+        }
+    }
+}
+
+/**
+ * FUNCTION NAME: getAddress
+ *
+ * DESCRIPTION: return address given the id and port
+ */
+Address* MP1Node::getAddress(int id, short port) {
+    Address* address = new Address();
+    memcpy(&address->addr[0], &id, sizeof(int));
+    memcpy(&address->addr[4], &port, sizeof(short));
+    return address;
+}
+
+
+

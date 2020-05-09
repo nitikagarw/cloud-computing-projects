@@ -8,6 +8,19 @@
 /**
  * constructor
  */
+Transaction::Transaction(int transactionID, MessageType type, string key, string value, int timestamp) {
+	this->id = transactionID;
+	this->msgType = type;
+	this->key = key;
+	this->value = value;
+	this->timestamp = timestamp;
+	this->replyCount = 0;
+	this->successCount = 0;
+}
+
+/**
+ * constructor
+ */
 MP2Node::MP2Node(Member *memberNode, Params *par, EmulNet * emulNet, Log * log, Address * address) {
 	this->memberNode = memberNode;
 	this->par = par;
@@ -23,6 +36,11 @@ MP2Node::MP2Node(Member *memberNode, Params *par, EmulNet * emulNet, Log * log, 
 MP2Node::~MP2Node() {
 	delete ht;
 	delete memberNode;
+	map<int, Transaction*>::iterator it = transactionMap.begin();
+	while(it != transactionMap.end()){
+		delete it->second;
+		++it;
+	}
 }
 
 /**
@@ -45,6 +63,7 @@ void MP2Node::updateRing() {
 	 *  Step 1. Get the current membership list from Membership Protocol / MP1
 	 */
 	curMemList = getMembershipList();
+	curMemList.emplace_back(Node(memberNode->addr));
 
 	/*
 	 * Step 2: Construct the ring
@@ -57,10 +76,25 @@ void MP2Node::updateRing() {
 	 * Step 3: Run the stabilization protocol IF REQUIRED
 	 */
 	// Run stabilization protocol if the hash table size is greater than zero and if there has been a changed in the ring
+	int ringSize = ring.size();
+	if(curMemList.size() != ringSize) {
+		change = true;
+	} else if(ringSize > 0){
+		for(int i=0; i<ringSize; ++i) {
+			if(curMemList[i].getHashCode() != ring[i].getHashCode()){
+				change = true;
+				break;
+			}
+		}
+	}
+
+	ring = curMemList;
+	if(change)
+		stabilizationProtocol();
 }
 
 /**
- * FUNCTION NAME: getMemberhipList
+ * FUNCTION NAME: getMembershipList
  *
  * DESCRIPTION: This function goes through the membership list from the Membership protocol/MP1 and
  * 				i) generates the hash code for each member
@@ -108,9 +142,12 @@ size_t MP2Node::hashFunction(string key) {
  * 				3) Sends a message to the replica
  */
 void MP2Node::clientCreate(string key, string value) {
-	/*
-	 * Implement this
-	 */
+	Message msg = createMessage(MessageType::CREATE, key, value);
+	std::vector<Node> replicas = findNodes(key);
+	for(int i=0; i<replicas.size(); ++i){
+		emulNet->ENsend(&memberNode->addr, replicas[i].getAddress(), msg.toString());
+	}
+	++g_transID;
 }
 
 /**
@@ -123,9 +160,12 @@ void MP2Node::clientCreate(string key, string value) {
  * 				3) Sends a message to the replica
  */
 void MP2Node::clientRead(string key){
-	/*
-	 * Implement this
-	 */
+	Message msg = createMessage(MessageType::READ, key);
+	std::vector<Node> replicas = findNodes(key);
+	for(int i=0; i<replicas.size(); ++i){
+		emulNet->ENsend(&memberNode->addr, replicas[i].getAddress(), msg.toString());
+	}
+	++g_transID;
 }
 
 /**
@@ -138,9 +178,12 @@ void MP2Node::clientRead(string key){
  * 				3) Sends a message to the replica
  */
 void MP2Node::clientUpdate(string key, string value){
-	/*
-	 * Implement this
-	 */
+	Message msg = createMessage(MessageType::UPDATE, key, value);
+	std::vector<Node> replicas = findNodes(key);
+	for(int i=0; i<replicas.size(); ++i){
+		emulNet->ENsend(&memberNode->addr, replicas[i].getAddress(), msg.toString());
+	}
+	++g_transID;
 }
 
 /**
@@ -153,9 +196,12 @@ void MP2Node::clientUpdate(string key, string value){
  * 				3) Sends a message to the replica
  */
 void MP2Node::clientDelete(string key){
-	/*
-	 * Implement this
-	 */
+	Message msg = createMessage(MessageType::DELETE, key);
+	std::vector<Node> replicas = findNodes(key);
+	for(int i=0; i<replicas.size(); ++i){
+		emulNet->ENsend(&memberNode->addr, replicas[i].getAddress(), msg.toString());
+	}
+	++g_transID;
 }
 
 /**
@@ -166,11 +212,19 @@ void MP2Node::clientDelete(string key){
  * 			   	1) Inserts key value into the local hash table
  * 			   	2) Return true or false based on success or failure
  */
-bool MP2Node::createKeyValue(string key, string value, ReplicaType replica) {
-	/*
-	 * Implement this
-	 */
-	// Insert key, value, replicaType into the hash table
+bool MP2Node::createKeyValue(string key, string value, ReplicaType replica, int transactionID) {
+	bool success = false;
+	if(transactionID != STABLE) {
+		success = ht->create(key, value);
+		if(success)
+			log->logCreateSuccess(&memberNode->addr, false, transactionID, key, value);
+		else
+			log->logCreateFail(&memberNode->addr, false, transactionID, key, value);
+	} else {
+		if(ht->read(key) == "")
+			success = ht->create(key, value);
+	}
+	return success;
 }
 
 /**
@@ -181,11 +235,13 @@ bool MP2Node::createKeyValue(string key, string value, ReplicaType replica) {
  * 			    1) Read key from local hash table
  * 			    2) Return value
  */
-string MP2Node::readKey(string key) {
-	/*
-	 * Implement this
-	 */
-	// Read key from local hash table and return value
+string MP2Node::readKey(string key, int transactionID) {
+	string value = ht->read(key);
+	if(value != "")
+		log->logReadSuccess(&memberNode->addr, false, transactionID, key, value);
+	else
+		log->logReadFail(&memberNode->addr, false, transactionID, key);
+	return value;
 }
 
 /**
@@ -196,11 +252,13 @@ string MP2Node::readKey(string key) {
  * 				1) Update the key to the new value in the local hash table
  * 				2) Return true or false based on success or failure
  */
-bool MP2Node::updateKeyValue(string key, string value, ReplicaType replica) {
-	/*
-	 * Implement this
-	 */
-	// Update key in local hash table and return true or false
+bool MP2Node::updateKeyValue(string key, string value, ReplicaType replica, int transactionID) {
+	bool success = ht->update(key, value);
+	if(success)
+		log->logUpdateSuccess(&memberNode->addr, false, transactionID, key, value);
+	else
+		log->logUpdateFail(&memberNode->addr, false, transactionID, key, value);
+	return success;
 }
 
 /**
@@ -211,11 +269,15 @@ bool MP2Node::updateKeyValue(string key, string value, ReplicaType replica) {
  * 				1) Delete the key from the local hash table
  * 				2) Return true or false based on success or failure
  */
-bool MP2Node::deletekey(string key) {
-	/*
-	 * Implement this
-	 */
-	// Delete the key from the local hash table
+bool MP2Node::deletekey(string key, int transactionID) {
+	bool success = ht->deleteKey(key);
+	if(transactionID != STABLE){
+		if(success)
+			log->logDeleteSuccess(&memberNode->addr, false, transactionID, key);
+		else
+			log->logDeleteFail(&memberNode->addr, false, transactionID, key);		
+	}
+	return success;
 }
 
 /**
@@ -225,6 +287,7 @@ bool MP2Node::deletekey(string key) {
  * 				This function does the following:
  * 				1) Pops messages from the queue
  * 				2) Handles the messages according to message types
+ * 				3) Ensure all READ and UPDATE operation get QUORUM replies.
  */
 void MP2Node::checkMessages() {
 	/*
@@ -247,17 +310,56 @@ void MP2Node::checkMessages() {
 		memberNode->mp2q.pop();
 
 		string message(data, data + size);
+		Message msg(message);
 
-		/*
-		 * Handle the message types here
-		 */
-
+		switch(msg.type) {
+			case MessageType::CREATE: {
+				bool success = createKeyValue(msg.key, msg.value, msg.replica, msg.transID);
+				if(msg.transID != STABLE)
+					sendReply(&msg.fromAddr, msg.transID, success, msg.type, msg.key);
+				break;
+			}
+			case MessageType::READ: {
+				string value = readKey(msg.key, msg.transID);
+				bool success = !value.empty();
+				sendReply(&msg.fromAddr, msg.transID, success, msg.type, msg.key, value);
+				break;
+			}
+			case MessageType::UPDATE: {
+				bool success = updateKeyValue(msg.key, msg.value, msg.replica, msg.transID);
+				sendReply(&msg.fromAddr, msg.transID, success, msg.type, msg.key);
+				break;
+			}
+			case MessageType::DELETE: {
+				bool success = deletekey(msg.key, msg.transID);
+				if(msg.transID != STABLE)
+					sendReply(&msg.fromAddr, msg.transID, success, msg.type, msg.key);
+				break;				
+			}
+			case MessageType::REPLY: {
+				map<int, Transaction*>::iterator it = transactionMap.find(msg.transID);
+				if(it != transactionMap.end()) { //Found
+					Transaction* t = transactionMap[msg.transID];
+					t->replyCount ++;
+					if(msg.success)
+						t->successCount ++;
+				}
+				break;					
+			}
+			case MessageType::READREPLY: {
+				map<int, Transaction*>::iterator it = transactionMap.find(msg.transID);
+				if(it != transactionMap.end()) { //Found
+					Transaction* t = transactionMap[msg.transID];
+					t->replyCount ++;
+					t->value = msg.value;
+					if(!msg.value.empty())
+						t->successCount ++;
+				}
+				break;				
+			}						
+		}
+		checkTransactionMap();
 	}
-
-	/*
-	 * This function should also ensure all READ and UPDATE operation
-	 * get QUORUM replies
-	 */
 }
 
 /**
@@ -325,7 +427,118 @@ int MP2Node::enqueueWrapper(void *env, char *buff, int size) {
  *				Note:- "CORRECT" replicas implies that every key is replicated in its two neighboring nodes in the ring
  */
 void MP2Node::stabilizationProtocol() {
-	/*
-	 * Implement this
-	 */
+	map<string, string>::iterator it = ht->hashTable.begin();
+	while(it != ht->hashTable.end()) {
+		string key = it->first;
+		string value = it->second;
+		vector<Node> replicas = findNodes(key);
+		Message message(STABLE, memberNode->addr, MessageType::CREATE, key, value);
+		for(int i=0; i<replicas.size(); ++i){
+			emulNet->ENsend(&memberNode->addr, replicas[i].getAddress(), message.toString());
+		}
+		++it;
+	}
+}
+
+Message MP2Node::createMessage(MessageType type, string key, string value, bool success) {
+	createTransaction(g_transID, type, key, value);
+	if(type == CREATE || type == UPDATE){
+		Message msg(g_transID, memberNode->addr, type, key, value);
+		return msg;
+	} else if(type == READ || type == DELETE){
+		Message msg(g_transID, memberNode->addr, type, key);
+		return msg;
+	}
+	return Message("");
+}
+
+void MP2Node::createTransaction(int transactionID, MessageType type, string key, string value) {
+	Transaction* transaction = new Transaction(transactionID, type, key, value, par->getcurrtime());
+	transactionMap.emplace(transactionID, transaction);
+}
+
+void MP2Node::checkTransactionMap() {
+	map<int, Transaction*>::iterator it = transactionMap.begin();
+	while(it != transactionMap.end()) {
+		int transactionID = it->first;
+		Transaction* transaction = it->second;
+		int replyCount = transaction->replyCount;
+		int successCount = transaction->successCount;
+
+		if(replyCount == 3) {
+			(successCount >= 2) ? logOperation(transaction, true, true, transactionID) : logOperation(transaction, true, false, transactionID);
+			delete transaction;
+			it = transactionMap.erase(it);
+			continue;
+		} else {
+			if(successCount == 2) {
+				logOperation(transaction, true, true, transactionID);
+				transactionState.emplace(transactionID, true);
+				delete transaction;
+				it = transactionMap.erase(it);
+				continue;
+			} 
+			if(replyCount - successCount == 2) {
+				logOperation(transaction, true, false, transactionID);
+				transactionState.emplace(transactionID, false);
+				delete transaction;
+				it = transactionMap.erase(it);
+				continue;
+			}
+		}
+		if(par->getcurrtime() - transaction->getTimestamp() > 10) {
+			logOperation(transaction, true, false, transactionID);
+			transactionState.emplace(transactionID, false);
+			delete transaction;
+			it = transactionMap.erase(it);
+			continue;
+		}
+		++it;
+	}
+}
+
+void MP2Node::sendReply(Address* fromAddr, int transactionID, bool success, MessageType type, string key, string content) {
+	if(type == READ) {
+		Message message(transactionID, memberNode->addr, content);
+		emulNet->ENsend(&memberNode->addr, fromAddr, message.toString());
+	} else {
+		Message message(transactionID, memberNode->addr, MessageType::REPLY, success);
+		emulNet->ENsend(&memberNode->addr, fromAddr, message.toString());
+	}
+}
+
+void MP2Node::logOperation(Transaction* transaction, bool isCoordinator, bool success, int transactionID) {
+	string key = transaction->key;
+	string value = transaction->value;
+
+	switch(transaction->msgType) {
+		case CREATE: { 
+			if(success)
+				log->logCreateSuccess(&memberNode->addr, isCoordinator, transactionID, key, value);
+			else 
+				log->logCreateFail(&memberNode->addr, isCoordinator, transactionID, key, value);
+			break;
+		}
+		case READ: {
+			if(success)
+				log->logReadSuccess(&memberNode->addr, isCoordinator, transactionID, key, value);
+			else 
+				log->logReadFail(&memberNode->addr, isCoordinator, transactionID, key);
+			break;
+		}
+		case UPDATE: {
+			if(success)
+				log->logUpdateSuccess(&memberNode->addr, isCoordinator, transactionID, key, value);
+			else 
+				log->logUpdateFail(&memberNode->addr, isCoordinator, transactionID, key, value);
+			break;
+		}
+		case DELETE: {
+			if(success)
+				log->logDeleteSuccess(&memberNode->addr, isCoordinator, transactionID, key);
+			else 
+				log->logDeleteFail(&memberNode->addr, isCoordinator, transactionID, key);
+			break;
+		}
+	}
 }

@@ -18,6 +18,33 @@
 #include "Params.h"
 #include "Message.h"
 #include "Queue.h"
+#define STABLE -1
+
+/**
+ * CLASS NAME: Transaction
+ *
+ * DESCRIPTION: This class encapsulates all transaction details:
+ * 				1) ID
+ * 				2) Timestamp
+ * 				3) Reply and Success count
+ */
+class Transaction {
+private:
+	int id;
+	int timestamp;
+
+public:
+	string key;
+	string value;
+	MessageType msgType;
+	int replyCount;
+	int successCount;
+	Transaction(int transactionID, MessageType type, string key, string value, int timestamp);
+	int getTimestamp() {
+		return timestamp;
+	}
+
+};
 
 /**
  * CLASS NAME: MP2Node
@@ -47,6 +74,10 @@ private:
 	EmulNet * emulNet;
 	// Object of Log
 	Log * log;
+	//Map of transactions
+	map<int, Transaction*> transactionMap;
+	//Map of transaction states
+	map<int, bool> transactionState;
 
 public:
 	MP2Node(Member *memberNode, Params *par, EmulNet *emulNet, Log *log, Address *addressOfMember);
@@ -80,13 +111,19 @@ public:
 	vector<Node> findNodes(string key);
 
 	// server
-	bool createKeyValue(string key, string value, ReplicaType replica);
-	string readKey(string key);
-	bool updateKeyValue(string key, string value, ReplicaType replica);
-	bool deletekey(string key);
+	bool createKeyValue(string key, string value, ReplicaType replica, int transactionID);
+	string readKey(string key, int transactionID);
+	bool updateKeyValue(string key, string value, ReplicaType replica, int transactionID);
+	bool deletekey(string key, int transactionID);
 
 	// stabilization protocol - handle multiple failures
 	void stabilizationProtocol();
+
+	Message createMessage(MessageType type, string key, string value = "", bool success = false);
+	void createTransaction(int transactionID, MessageType type, string key, string value);
+	void checkTransactionMap();
+	void sendReply(Address* fromAddr, int transactionID, bool success, MessageType type, string key, string content = "");
+	void logOperation(Transaction* transaction, bool isCoordinator, bool success, int transactionID);
 
 	~MP2Node();
 };
